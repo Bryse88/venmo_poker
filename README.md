@@ -1,6 +1,6 @@
 # Venmo Email Parser
 
-Parses Venmo payment notification emails from Gmail and logs them to an Excel spreadsheet.
+Parses Venmo payment notification emails from Gmail and logs them to a CSV file.
 
 ## Features
 
@@ -31,19 +31,7 @@ pip install -r requirements.txt
 
 Create a label called "Venmo" in Gmail and apply it to your Venmo payment emails.
 
-### 4. Excel file
-
-Ensure `Poker.xlsx` exists with a sheet named `money ` (note the trailing space). The script writes to:
-
-| Column | Data |
-|--------|------|
-| B | Name |
-| C | Amount IN (incoming payments) |
-| D | Amount OUT (outgoing payments) |
-| E | Date |
-| F | Note/memo |
-
-### 5. Configuration (optional)
+### 4. Configuration (optional)
 
 Copy `.env.example` to `.env` and customize:
 
@@ -55,10 +43,22 @@ Available settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EXCEL_PATH` | `Poker.xlsx` | Path to Excel file |
+| `CSV_PATH` | `payments.csv` | Path to output CSV file |
 | `GMAIL_LABEL` | `Venmo` | Gmail label to search |
 | `POLL_INTERVAL` | `300` | Seconds between checks (continuous mode) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+
+## Output
+
+The CSV file has these columns:
+
+| Column | Data |
+|--------|------|
+| Name | Person's name |
+| Amount IN | Incoming payment amount |
+| Amount OUT | Outgoing payment amount |
+| Date | Payment date/time |
+| Note | Payment memo |
 
 ## Usage
 
@@ -94,4 +94,4 @@ LOG_LEVEL=DEBUG python run_etl.py --once
 | `credentials.json` | Gmail API credentials (you provide) |
 | `token.pickle` | Cached auth token (auto-generated) |
 | `processed_messages.json` | Tracks processed emails (auto-generated) |
-| `Poker.xlsx` | Output spreadsheet (you provide) |
+| `payments.csv` | Output file (auto-generated) |

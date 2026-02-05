@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import json
 import logging
 import os
@@ -24,13 +25,12 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
-import openpyxl
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-EXCEL_PATH = os.getenv('EXCEL_PATH', 'Poker.xlsx')
+CSV_PATH = os.getenv('CSV_PATH', 'payments.csv')
 GMAIL_LABEL = os.getenv('GMAIL_LABEL', 'Venmo')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '300'))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -264,36 +264,35 @@ def parse_email_content(service: Resource, message_id: str) -> Optional[Payment]
         return None
 
 
-def add_to_excel(excel_path: str, payments: list[Payment]) -> bool:
-    """Add payment data to Excel sheet. Returns True on success."""
+def add_to_csv(csv_path: str, payments: list[Payment]) -> bool:
+    """Add payment data to CSV file. Returns True on success."""
     try:
-        wb = openpyxl.load_workbook(excel_path)
-        ws = wb['money ']  # Note the space in sheet name
+        # Check if file exists to determine if we need headers
+        file_exists = os.path.exists(csv_path)
 
-        # Find the next empty row
-        next_row = ws.max_row + 1
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
 
-        # Add each payment
-        for payment in payments:
-            ws.cell(row=next_row, column=2, value=payment.name)      # Column B: name
-            if payment.is_outgoing:
-                ws.cell(row=next_row, column=4, value=abs(payment.amount))  # Column D: amount OUT
-            else:
-                ws.cell(row=next_row, column=3, value=payment.amount)       # Column C: amount IN
-            ws.cell(row=next_row, column=5, value=payment.date)      # Column E: date
-            ws.cell(row=next_row, column=6, value=payment.note)      # Column F: note
-            next_row += 1
+            # Write header if new file
+            if not file_exists:
+                writer.writerow(['Name', 'Amount IN', 'Amount OUT', 'Date', 'Note'])
 
-        wb.save(excel_path)
-        logger.info(f"Added {len(payments)} payment(s) to Excel")
+            # Write each payment
+            for payment in payments:
+                amount_in = payment.amount if not payment.is_outgoing else ''
+                amount_out = abs(payment.amount) if payment.is_outgoing else ''
+                date_str = payment.date.strftime('%Y-%m-%d %H:%M:%S') if payment.date else ''
+                writer.writerow([payment.name, amount_in, amount_out, date_str, payment.note or ''])
+
+        logger.info(f"Added {len(payments)} payment(s) to CSV")
         return True
 
     except Exception as e:
-        logger.error(f"Error updating Excel: {e}")
+        logger.error(f"Error updating CSV: {e}")
         return False
 
 
-def run_parser(service: Resource, excel_path: str, processed_ids: set[str]) -> int:
+def run_parser(service: Resource, csv_path: str, processed_ids: set[str]) -> int:
     """Run a single parsing cycle. Returns number of new payments processed."""
     messages = get_venmo_emails(service)
 
@@ -326,7 +325,7 @@ def run_parser(service: Resource, excel_path: str, processed_ids: set[str]) -> i
         processed_ids.add(msg['id'])
 
     if payments:
-        add_to_excel(excel_path, payments)
+        add_to_csv(csv_path, payments)
     else:
         logger.warning("No payment information could be extracted from new emails")
 
@@ -341,11 +340,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logger.info("Venmo Email Parser starting")
-    logger.info(f"Config: excel={EXCEL_PATH}, label={GMAIL_LABEL}, poll={POLL_INTERVAL}s")
-
-    if not os.path.exists(EXCEL_PATH):
-        logger.error(f"Excel file '{EXCEL_PATH}' not found!")
-        return
+    logger.info(f"Config: csv={CSV_PATH}, label={GMAIL_LABEL}, poll={POLL_INTERVAL}s")
 
     logger.info("Authenticating with Gmail...")
     service = authenticate_gmail()
@@ -357,7 +352,7 @@ def main() -> None:
 
     if args.once:
         # Single run mode
-        run_parser(service, EXCEL_PATH, processed_ids)
+        run_parser(service, CSV_PATH, processed_ids)
         save_processed_ids(processed_ids)
         logger.info("Complete!")
     else:
@@ -365,7 +360,7 @@ def main() -> None:
         logger.info(f"Starting continuous polling (every {POLL_INTERVAL}s, Ctrl+C to stop)")
         try:
             while True:
-                run_parser(service, EXCEL_PATH, processed_ids)
+                run_parser(service, CSV_PATH, processed_ids)
                 save_processed_ids(processed_ids)
                 logger.debug(f"Sleeping for {POLL_INTERVAL} seconds...")
                 time.sleep(POLL_INTERVAL)
