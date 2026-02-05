@@ -38,9 +38,10 @@ Ensure `Poker.xlsx` exists with a sheet named `money ` (note the trailing space)
 | Column | Data |
 |--------|------|
 | B | Name |
-| C | Amount (positive=incoming, negative=outgoing) |
-| D | Date |
-| E | Note/memo |
+| C | Amount IN (incoming payments) |
+| D | Amount OUT (outgoing payments) |
+| E | Date |
+| F | Note/memo |
 
 ### 5. Configuration (optional)
 

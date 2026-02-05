@@ -276,9 +276,12 @@ def add_to_excel(excel_path: str, payments: list[Payment]) -> bool:
         # Add each payment
         for payment in payments:
             ws.cell(row=next_row, column=2, value=payment.name)      # Column B: name
-            ws.cell(row=next_row, column=3, value=payment.amount)    # Column C: amount
-            ws.cell(row=next_row, column=4, value=payment.date)      # Column D: date
-            ws.cell(row=next_row, column=5, value=payment.note)      # Column E: note
+            if payment.is_outgoing:
+                ws.cell(row=next_row, column=4, value=abs(payment.amount))  # Column D: amount OUT
+            else:
+                ws.cell(row=next_row, column=3, value=payment.amount)       # Column C: amount IN
+            ws.cell(row=next_row, column=5, value=payment.date)      # Column E: date
+            ws.cell(row=next_row, column=6, value=payment.note)      # Column F: note
             next_row += 1
 
         wb.save(excel_path)
