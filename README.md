@@ -2,6 +2,15 @@
 
 Parses Venmo payment notification emails from Gmail and logs them to an Excel spreadsheet.
 
+## Features
+
+- Parses both incoming ("X paid you") and outgoing ("You paid X") payments
+- Captures payment date and note/memo
+- Handles Gmail pagination (processes all emails, not just first 100)
+- Tracks processed emails to avoid duplicates
+- Configurable via environment variables
+- Proper logging with configurable levels
+
 ## Setup
 
 ### 1. Install dependencies
@@ -24,7 +33,31 @@ Create a label called "Venmo" in Gmail and apply it to your Venmo payment emails
 
 ### 4. Excel file
 
-Ensure `Poker.xlsx` exists with a sheet named `money ` (note the trailing space). The script writes to columns B (name) and C (amount).
+Ensure `Poker.xlsx` exists with a sheet named `money ` (note the trailing space). The script writes to:
+
+| Column | Data |
+|--------|------|
+| B | Name |
+| C | Amount (positive=incoming, negative=outgoing) |
+| D | Date |
+| E | Note/memo |
+
+### 5. Configuration (optional)
+
+Copy `.env.example` to `.env` and customize:
+
+```bash
+cp .env.example .env
+```
+
+Available settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EXCEL_PATH` | `Poker.xlsx` | Path to Excel file |
+| `GMAIL_LABEL` | `Venmo` | Gmail label to search |
+| `POLL_INTERVAL` | `300` | Seconds between checks (continuous mode) |
+| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Usage
 
@@ -42,23 +75,21 @@ Processes all new emails once and exits.
 python run_etl.py
 ```
 
-Runs continuously, checking for new emails every 5 minutes. Press Ctrl+C to stop.
+Runs continuously, checking for new emails every 5 minutes (configurable). Press Ctrl+C to stop.
 
-## How it works
+### Debug mode
 
-- Authenticates with Gmail using OAuth 2.0
-- Fetches emails from the "Venmo" label
-- Parses payment info from email body:
-  - Incoming: "Name paid you $X" (positive amount)
-  - Outgoing: "You paid Name $X" (negative amount)
-- Appends payments to Excel spreadsheet
-- Tracks processed message IDs in `processed_messages.json` to avoid duplicates
+```bash
+LOG_LEVEL=DEBUG python run_etl.py --once
+```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `run_etl.py` | Main script |
+| `requirements.txt` | Python dependencies |
+| `.env` | Configuration (you create from `.env.example`) |
 | `credentials.json` | Gmail API credentials (you provide) |
 | `token.pickle` | Cached auth token (auto-generated) |
 | `processed_messages.json` | Tracks processed emails (auto-generated) |

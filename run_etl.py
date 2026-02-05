@@ -4,26 +4,64 @@ Venmo Email Parser for Gmail
 Reads Venmo payment notification emails and adds them to Excel spreadsheet
 """
 
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import logging
 import os
 import pickle
-import base64
 import re
 import time
-import argparse
-import json
+from dataclasses import dataclass
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from typing import Optional
+
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build, Resource
 import openpyxl
 
-# Gmail API scope
+# Load environment variables
+load_dotenv()
+
+# Configuration
+EXCEL_PATH = os.getenv('EXCEL_PATH', 'Poker.xlsx')
+GMAIL_LABEL = os.getenv('GMAIL_LABEL', 'Venmo')
+POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '300'))
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+# Constants
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-EXCEL_PATH = "Poker.xlsx"
 PROCESSED_IDS_FILE = 'processed_messages.json'
 
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL.upper()),
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-def load_processed_ids():
+
+@dataclass
+class Payment:
+    """Represents a Venmo payment."""
+    name: str
+    amount: float
+    date: Optional[datetime] = None
+    note: Optional[str] = None
+
+    @property
+    def is_outgoing(self) -> bool:
+        return self.amount < 0
+
+
+def load_processed_ids() -> set[str]:
     """Load set of already processed message IDs from JSON file."""
     if os.path.exists(PROCESSED_IDS_FILE):
         with open(PROCESSED_IDS_FILE, 'r') as f:
@@ -31,15 +69,15 @@ def load_processed_ids():
     return set()
 
 
-def save_processed_ids(processed_ids):
+def save_processed_ids(processed_ids: set[str]) -> None:
     """Save processed message IDs to JSON file."""
     with open(PROCESSED_IDS_FILE, 'w') as f:
         json.dump(list(processed_ids), f)
 
 
-def authenticate_gmail():
-    """Authenticate with Gmail API"""
-    creds = None
+def authenticate_gmail() -> Resource:
+    """Authenticate with Gmail API and return service object."""
+    creds: Optional[Credentials] = None
 
     # Token file stores user's access and refresh tokens
     if os.path.exists('token.pickle'):
@@ -62,12 +100,12 @@ def authenticate_gmail():
     return build('gmail', 'v1', credentials=creds)
 
 
-def get_venmo_emails(service, label_name='Venmo'):
-    """Fetch emails from Venmo label"""
+def get_venmo_emails(service: Resource, label_name: str = GMAIL_LABEL) -> list[dict]:
+    """Fetch all emails from Venmo label, handling pagination."""
     try:
-        # Get label ID for "Venmo"
+        # Get label ID for specified label
         labels = service.users().labels().list(userId='me').execute()
-        label_id = None
+        label_id: Optional[str] = None
 
         for label in labels.get('labels', []):
             if label['name'].lower() == label_name.lower():
@@ -75,31 +113,49 @@ def get_venmo_emails(service, label_name='Venmo'):
                 break
 
         if not label_id:
-            print(f"Label '{label_name}' not found in Gmail")
+            logger.warning(f"Label '{label_name}' not found in Gmail")
             return []
 
-        # Fetch messages with Venmo label
-        results = service.users().messages().list(
-            userId='me',
-            labelIds=[label_id],
-            q='from:venmo@venmo.com'  # Filter for Venmo emails
-        ).execute()
+        # Fetch all messages with pagination
+        all_messages: list[dict] = []
+        page_token: Optional[str] = None
 
-        messages = results.get('messages', [])
-        return messages
+        while True:
+            results = service.users().messages().list(
+                userId='me',
+                labelIds=[label_id],
+                q='from:venmo@venmo.com',
+                pageToken=page_token
+            ).execute()
+
+            messages = results.get('messages', [])
+            all_messages.extend(messages)
+
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+
+            logger.debug(f"Fetched {len(all_messages)} messages, getting next page...")
+
+        logger.info(f"Found {len(all_messages)} total email(s) in '{label_name}' label")
+        return all_messages
 
     except Exception as e:
-        print(f"Error fetching emails: {e}")
+        logger.error(f"Error fetching emails: {e}")
         return []
 
 
-def extract_payment_info(email_body):
-    """Extract payer name and dollar amount from Venmo email.
+def extract_payment_info(email_body: str) -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """Extract payer name, amount, and note from Venmo email.
 
-    Returns (name, amount) where:
+    Returns (name, amount, note) where:
     - Incoming payments (X paid you): positive amount
     - Outgoing payments (You paid X): negative amount
+    - Note: the payment memo if found
     """
+    name: Optional[str] = None
+    amount: Optional[float] = None
+    note: Optional[str] = None
 
     # Pattern for "FirstName LastName paid you $XX.XX" (incoming)
     incoming_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+paid you\s+\$(\d+(?:\.\d{2})?)'
@@ -107,25 +163,61 @@ def extract_payment_info(email_body):
     # Pattern for "You paid FirstName LastName $XX.XX" (outgoing)
     outgoing_pattern = r'You paid\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+\$(\d+(?:\.\d{2})?)'
 
-    # Check for incoming payment first
+    # Pattern for payment note - typically in quotes or after a dash
+    note_patterns = [
+        r'["\u201c]([^"\u201d]+)["\u201d]',  # "note" or "note"
+        r'[-\u2013\u2014]\s*(.+?)(?:\n|$)',   # - note or — note
+    ]
+
+    # Check for incoming payment
     match = re.search(incoming_pattern, email_body)
     if match:
-        payer_name = match.group(1)
+        name = match.group(1)
         amount = float(match.group(2))
-        return payer_name, amount
+    else:
+        # Check for outgoing payment
+        match = re.search(outgoing_pattern, email_body)
+        if match:
+            name = match.group(1)
+            amount = -float(match.group(2))  # Negative for outgoing
 
-    # Check for outgoing payment
-    match = re.search(outgoing_pattern, email_body)
-    if match:
-        payee_name = match.group(1)
-        amount = -float(match.group(2))  # Negative for outgoing
-        return payee_name, amount
+    # Try to extract note
+    for pattern in note_patterns:
+        note_match = re.search(pattern, email_body)
+        if note_match:
+            potential_note = note_match.group(1).strip()
+            # Filter out common non-note matches
+            if potential_note and len(potential_note) > 1 and not potential_note.startswith('http'):
+                note = potential_note
+                break
 
-    return None, None
+    return name, amount, note
 
 
-def parse_email_content(service, message_id):
-    """Get email content and extract payment info"""
+def get_email_date(message: dict) -> Optional[datetime]:
+    """Extract date from email message headers."""
+    headers = message.get('payload', {}).get('headers', [])
+
+    for header in headers:
+        if header['name'].lower() == 'date':
+            try:
+                return parsedate_to_datetime(header['value'])
+            except Exception:
+                pass
+
+    # Fallback to internalDate (milliseconds since epoch)
+    internal_date = message.get('internalDate')
+    if internal_date:
+        try:
+            return datetime.fromtimestamp(int(internal_date) / 1000)
+        except Exception:
+            pass
+
+    return None
+
+
+def parse_email_content(service: Resource, message_id: str) -> Optional[Payment]:
+    """Get email content and extract payment info."""
     try:
         message = service.users().messages().get(
             userId='me',
@@ -155,120 +247,129 @@ def parse_email_content(service, message_id):
         if not email_body:
             email_body = message.get('snippet', '')
 
-        return extract_payment_info(email_body)
+        name, amount, note = extract_payment_info(email_body)
+
+        if name and amount is not None:
+            return Payment(
+                name=name,
+                amount=amount,
+                date=get_email_date(message),
+                note=note
+            )
+
+        return None
 
     except Exception as e:
-        print(f"Error parsing email {message_id}: {e}")
-        return None, None
+        logger.error(f"Error parsing email {message_id}: {e}")
+        return None
 
 
-def add_to_excel(excel_path, payments):
-    """Add payment data to Excel sheet"""
+def add_to_excel(excel_path: str, payments: list[Payment]) -> bool:
+    """Add payment data to Excel sheet. Returns True on success."""
     try:
         wb = openpyxl.load_workbook(excel_path)
         ws = wb['money ']  # Note the space in sheet name
 
-        # Find the next empty row (starting after row 3 which has headers)
+        # Find the next empty row
         next_row = ws.max_row + 1
 
         # Add each payment
-        for name, amount in payments:
-            ws.cell(row=next_row, column=2, value=name)  # Column B: name
-            ws.cell(row=next_row, column=3, value=amount)  # Column C: dollar amount (positive or negative)
+        for payment in payments:
+            ws.cell(row=next_row, column=2, value=payment.name)      # Column B: name
+            ws.cell(row=next_row, column=3, value=payment.amount)    # Column C: amount
+            ws.cell(row=next_row, column=4, value=payment.date)      # Column D: date
+            ws.cell(row=next_row, column=5, value=payment.note)      # Column E: note
             next_row += 1
 
         wb.save(excel_path)
-        print(f"[OK] Added {len(payments)} payment(s) to Excel")
+        logger.info(f"Added {len(payments)} payment(s) to Excel")
+        return True
 
     except Exception as e:
-        print(f"Error updating Excel: {e}")
+        logger.error(f"Error updating Excel: {e}")
+        return False
 
 
-def run_parser(service, excel_path, processed_ids):
+def run_parser(service: Resource, excel_path: str, processed_ids: set[str]) -> int:
     """Run a single parsing cycle. Returns number of new payments processed."""
     messages = get_venmo_emails(service)
 
     if not messages:
-        print("No Venmo emails found")
+        logger.info("No Venmo emails found")
         return 0
 
     # Filter out already processed messages
     new_messages = [msg for msg in messages if msg['id'] not in processed_ids]
 
     if not new_messages:
-        print("No new emails to process")
+        logger.info("No new emails to process")
         return 0
 
-    print(f"[OK] Found {len(new_messages)} new email(s) to process")
+    logger.info(f"Processing {len(new_messages)} new email(s)")
 
-    payments = []
+    payments: list[Payment] = []
     for msg in new_messages:
-        name, amount = parse_email_content(service, msg['id'])
-        if name and amount is not None:
-            payments.append((name, amount))
-            if amount >= 0:
-                print(f"  [OK] Found: {name} paid ${amount:.2f}")
-            else:
-                print(f"  [OK] Found: You paid {name} ${-amount:.2f}")
-            processed_ids.add(msg['id'])
+        payment = parse_email_content(service, msg['id'])
+        if payment:
+            payments.append(payment)
+            direction = "paid you" if not payment.is_outgoing else "you paid"
+            amount_display = abs(payment.amount)
+            note_display = f' - "{payment.note}"' if payment.note else ''
+            logger.info(f"  Found: {payment.name} {direction} ${amount_display:.2f}{note_display}")
         else:
-            print(f"  [!] Could not parse message {msg['id']}")
-            # Still mark as processed to avoid retrying unparseable emails
-            processed_ids.add(msg['id'])
+            logger.warning(f"  Could not parse message {msg['id']}")
+
+        # Mark as processed regardless of parse success
+        processed_ids.add(msg['id'])
 
     if payments:
         add_to_excel(excel_path, payments)
     else:
-        print("[!] No payment information could be extracted from new emails")
+        logger.warning("No payment information could be extracted from new emails")
 
     return len(payments)
 
 
-def main():
-    """Main function"""
+def main() -> None:
+    """Main entry point."""
     parser = argparse.ArgumentParser(description='Venmo Email Parser for Gmail')
     parser.add_argument('--once', action='store_true',
                         help='Run once and exit instead of continuous polling')
     args = parser.parse_args()
 
-    print("Venmo Email Parser")
-    print("=" * 50)
+    logger.info("Venmo Email Parser starting")
+    logger.info(f"Config: excel={EXCEL_PATH}, label={GMAIL_LABEL}, poll={POLL_INTERVAL}s")
 
-    excel_path = EXCEL_PATH
-    if not os.path.exists(excel_path):
-        print(f"Error: Excel file '{excel_path}' not found!")
+    if not os.path.exists(EXCEL_PATH):
+        logger.error(f"Excel file '{EXCEL_PATH}' not found!")
         return
 
-    print("Authenticating with Gmail...")
+    logger.info("Authenticating with Gmail...")
     service = authenticate_gmail()
-    print("[OK] Authentication successful")
+    logger.info("Authentication successful")
 
     # Load previously processed message IDs
     processed_ids = load_processed_ids()
-    print(f"[OK] Loaded {len(processed_ids)} previously processed message ID(s)")
+    logger.info(f"Loaded {len(processed_ids)} previously processed message ID(s)")
 
     if args.once:
         # Single run mode
-        print("\nRunning single parse cycle...")
-        run_parser(service, excel_path, processed_ids)
+        run_parser(service, EXCEL_PATH, processed_ids)
         save_processed_ids(processed_ids)
-        print("\n" + "=" * 50)
-        print("[OK] Complete! Check your Excel file.")
+        logger.info("Complete!")
     else:
         # Continuous polling mode
-        print("\nStarting continuous polling mode (Ctrl+C to stop)...")
+        logger.info(f"Starting continuous polling (every {POLL_INTERVAL}s, Ctrl+C to stop)")
         try:
             while True:
-                print("\n" + "=" * 50)
-                print("Running Venmo email parser...")
-                run_parser(service, excel_path, processed_ids)
+                run_parser(service, EXCEL_PATH, processed_ids)
                 save_processed_ids(processed_ids)
-                print("\nWaiting 5 minutes before next check...")
-                time.sleep(300)  # Wait 5 minutes
+                logger.debug(f"Sleeping for {POLL_INTERVAL} seconds...")
+                time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
-            print("\n\nStopping parser...")
+            logger.info("Stopping parser...")
             save_processed_ids(processed_ids)
-            print("[OK] Processed IDs saved. Goodbye!")
+            logger.info("Processed IDs saved. Goodbye!")
 
 
 if __name__ == '__main__':
